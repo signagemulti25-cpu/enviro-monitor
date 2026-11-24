@@ -1,0 +1,66 @@
+name: Collect readings and publish dashboard
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '3,13,23,33,43,53 * * * *'
+
+concurrency:
+  group: enviro-monitor-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Load or initialize measurement archive
+        run: |
+          set -euo pipefail
+          archive_dir="$RUNNER_TEMP/enviro-measurements"
+          branch=$(git ls-remote --heads origin refs/heads/measurements)
+          if [[ -n "$branch" ]]; then
+            git fetch origin refs/heads/measurements
+            git worktree add --detach "$archive_dir" FETCH_HEAD
+          else
+            git worktree add --detach "$archive_dir" HEAD
+            git -C "$archive_dir" switch --orphan measurements
+          fi
+      - run: npm ci
+      - name: Collect station data
+        run: node scripts/collect.mjs "$RUNNER_TEMP/enviro-measurements/archive.json"
+      - name: Save new readings
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/enviro-measurements"
+          git add archive.json
+          if ! git diff --cached --quiet; then
+            git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit -m "Record monitoring samples"
+            git push origin HEAD:refs/heads/measurements
+          fi
+      - run: npm run build
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
